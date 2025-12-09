@@ -1,0 +1,10 @@
+services:
+  - type: cron
+    name: nojima-line-monitor
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python monitor.py
+    cron: "*/15 * * * *"  # 15分ごと実行
+    envVars:
+      - key: CHANNEL_TOKEN
+        sync: false
