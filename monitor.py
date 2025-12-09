@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # ノジマ値下げ監視 - Render.com LINE版（15分ごと自動実行）
 
 import os
