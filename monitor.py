@@ -1,4 +1,5 @@
-# ノジマ値下げ監視 - Render.com LINE版（15分ごと自動実行）
+#!/usr/bin/env python3
+# ノジマ中古4カテゴリ値下げ監視 - スマホ/タブレット/PC/カメラ（15分ごと）
 
 import os
 import requests
@@ -7,51 +8,31 @@ import json
 from datetime import datetime
 import sys
 
-# ========== 環境変数設定 ==========
 CHANNEL_TOKEN = os.getenv('CHANNEL_TOKEN')
-NOJIMA_URL = "https://online.nojima.co.jp/category/114/"
+NOJIMA_CATEGORIES = {
+    "中古スマホ": "https://online.nojima.co.jp/category/10006902/",
+    "中古タブレット": "https://online.nojima.co.jp/category/10006501/",
+    "中古PC": "https://online.nojima.co.jp/category/10006301/",
+    "中古カメラ": "https://online.nojima.co.jp/category/10006201/"
+}
 PRICE_DB_FILE = "/tmp/nojima_prices.json"
 LINE_API_URL = "https://api.line.me/v2/bot/message/broadcast"
 
-# 必須チェック
 if not CHANNEL_TOKEN:
-    print("❌ CHANNEL_TOKEN が設定されていません")
-    print("Render.com の Environment Variables で設定してください")
+    print("❌ CHANNEL_TOKEN 未設定")
     sys.exit(1)
 
-print("✅ ノジマ値下げ監視（LINE版）開始")
-print(f"🔗 LINE API: {LINE_API_URL[:50]}...")
-
-# ========== LINE送信関数 ==========
-def send_line_message(message):
-    """LINEにメッセージ送信"""
+def send_line(text):
+    headers = {"Authorization": f"Bearer {CHANNEL_TOKEN}", "Content-Type": "application/json"}
+    data = {"messages": [{"type": "text", "text": text}]}
     try:
-        headers = {
-            "Authorization": f"Bearer {CHANNEL_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "messages": [
-                {
-                    "type": "text",
-                    "text": message
-                }
-            ]
-        }
-        response = requests.post(LINE_API_URL, headers=headers, json=data, timeout=10)
-        if response.status_code == 200:
-            print("✅ LINE送信成功")
-            return True
-        else:
-            print(f"❌ LINE送信エラー: {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ LINE送信失敗: {e}")
+        r = requests.post(LINE_API_URL, headers=headers, json=data, timeout=10)
+        print(f"✅ LINE: {r.status_code}")
+        return True
+    except:
         return False
 
-# ========== 価格DB管理 ==========
-def load_price_db():
-    """価格DB読み込み"""
+def load_db():
     try:
         if os.path.exists(PRICE_DB_FILE):
             with open(PRICE_DB_FILE, 'r', encoding='utf-8') as f:
@@ -60,114 +41,119 @@ def load_price_db():
     except:
         return {}
 
-def save_price_db(db):
-    """価格DB保存"""
+def save_db(db):
     try:
         with open(PRICE_DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, indent=2)
         print("💾 DB保存完了")
-    except Exception as e:
-        print(f"❌ DB保存エラー: {e}")
+    except:
+        pass
 
-# ========== スクレイピング ==========
-def fetch_products():
-    """ノジマから商品取得"""
+def scrape_category(url, category_name):
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        response = requests.get(NOJIMA_URL, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=15)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.content, 'html.parser')
         products = {}
         
-        # 商品コンテナを探す（複数パターン対応）
-        containers = soup.find_all(['div', 'li', 'a'], class_=lambda x: x and any(keyword in x for keyword in ['item', 'product', 'goods', 'ec-']))
+        print(f"🔍 {category_name} 取得中...")
         
-        for container in containers[:60]:
+        # 商品アイテム取得（複数セレクタ対応）
+        items = soup.find_all(['div', 'li', 'a'], class_=lambda x: x and any(kw in str(x).lower() for kw in ['product', 'item', 'goods', 'card']))
+        
+        for item in items[:40]:
             try:
-                # 商品名取得
-                name_elem = container.find(['h1','h2','h3','a','span'], string=lambda x: x and len(x.strip()) > 3)
-                if not name_elem:
+                # 商品名
+                name_elem = item.find(['h1','h2','h3','h4','.product-name','.item-title','a','span'])
+                if name_elem:
+                    name = name_elem.get_text(strip=True)[:60]
+                else:
                     continue
-                name = name_elem.get_text(strip=True)[:80]
                 
-                # 価格取得
-                price_elems = container.find_all(['span', 'div', 'p'], string=lambda x: x and '¥' in x)
-                for price_elem in price_elems:
-                    price_text = price_elem.get_text(strip=True)
-                    price_nums = ''.join(c for c in price_text if c.isdigit())
-                    if len(price_nums) > 3:
-                        price = int(price_nums)
-                        products[name] = price
-                        break
-                        
+                # 価格（¥抽出）
+                price_text = ''
+                price_elems = item.find_all(string=lambda x: x and '¥' in str(x))
+                for pe in price_elems:
+                    price_text = pe.strip()
+                    break
+                
+                if not price_text:
+                    price_span = item.find(['span', 'div', 'p', '.price'], class_=lambda x: x and ('price' in str(x).lower() or '¥' in str(x)))
+                    if price_span:
+                        price_text = price_span.get_text(strip=True)
+                
+                price_nums = ''.join(c for c in price_text if c.isdigit())
+                if len(price_nums) >= 4:
+                    price = int(price_nums)
+                    key = f"{category_name}:{name}"
+                    products[key] = price
+                    print(f"  📦 {name[:30]}: ¥{price:,}")
+                    
             except:
                 continue
         
-        print(f"📦 取得商品数: {len(products)}")
+        print(f"  ✅ {category_name}: {len(products)}件取得")
         return products
         
     except Exception as e:
-        print(f"❌ スクレイピングエラー: {e}")
+        print(f"❌ {category_name} エラー: {e}")
         return {}
 
-# ========== メイン実行 ==========
 def main():
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"⏰ 実行時刻: {timestamp}")
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S JST')
+    print(f"⏰ ノジマ4カテゴリ監視開始: {timestamp}")
     
-    # 開始通知（1日1回のみ）
-    now = datetime.now()
-    if now.hour == 0 and now.minute < 5:  # 0時台に1回
-        send_line_message(
-            f"✅ ノジマ値下げ監視 再起動\n"
-            f"⏰ {timestamp}\n"
-            f"🔗 {NOJIMA_URL}"
-        )
+    # DB読み込み
+    price_db = load_db()
+    print(f"💾 前回DB: {len(price_db)}件")
     
-    # 価格DB読み込み
-    price_db = load_price_db()
-    print(f"💾 前回DB: {len(price_db)}商品")
+    all_drops = []
     
-    # 商品取得
-    current_products = fetch_products()
-    if not current_products:
-        send_line_message(f"⚠️ 商品取得失敗\n⏰ {timestamp}")
-        return
+    # 4カテゴリ同時チェック
+    for category_name, url in NOJIMA_CATEGORIES.items():
+        current_products = scrape_category(url, category_name)
+        
+        # 値下げ検知
+        for key, price in current_products.items():
+            if key in price_db and price_db[key] > price:
+                drop_amount = price_db[key] - price
+                drop_percent = round((drop_amount / price_db[key]) * 100, 1)
+                cat_name = key.split(':')[0][:2]
+                prod_name = key.split(':', 1)[1]
+                all_drops.append({
+                    'category': cat_name,
+                    'name': prod_name[:35],
+                    'old': f"¥{price_db[key]:,}",
+                    'new': f"¥{price:,}",
+                    'drop': f"¥{drop_amount:,}",
+                    'pct': f"{drop_percent}%"
+                })
+        
+        # DB更新
+        price_db.update(current_products)
     
-    # 値下げ検知
-    price_drops = []
-    for name, price in current_products.items():
-        if name in price_db and price_db[name] > price > 0:
-            drop_amount = price_db[name] - price
-            drop_percent = round((drop_amount / price_db[name]) * 100, 1)
-            price_drops.append({
-                'name': name[:35],
-                'old': f"¥{price_db[name]:,}",
-                'new': f"¥{price:,}",
-                'drop': f"¥{drop_amount:,}",
-                'pct': f"{drop_percent}%"
-            })
+    print(f"📊 値下げ検知: {len(all_drops)}件")
     
-    # 通知送信
-    if price_drops:
-        message = f"🔥 【値下げ検知】{len(price_drops)}件\n⏰ {timestamp}\n\n"
-        for drop in sorted(price_drops, key=lambda x: int(x['drop'][1:].replace(',', '')), reverse=True)[:8]:
-            message += f"📱 {drop['name']}\n"
+    # LINE通知（値下げ時のみ）
+    if all_drops:
+        message = f"🔥 【ノジマ値下げ】{len(all_drops)}件\n⏰ {timestamp}\n\n"
+        for drop in sorted(all_drops, key=lambda x: int(x['drop'][1:].replace(',', '')), reverse=True)[:8]:
+            message += f"{drop['category']} {drop['name']}\n"
             message += f"   {drop['old']} → {drop['new']}\n"
             message += f"   {drop['drop']} ({drop['pct']})\n\n"
         
-        message += f"🔗 {NOJIMA_URL}"
-        send_line_message(message)
-        print(f"🔥 値下げ通知: {len(price_drops)}件")
+        message += "🔗 https://online.nojima.co.jp/category/114/"
+        if send_line(message):
+            print(f"✅ 値下げ通知送信: {len(all_drops)}件")
     else:
-        print("📊 値下げなし")
+        print("📊 値下げなし（正常）")
     
-    # DB更新
-    price_db.update(current_products)
-    save_price_db(price_db)
-    print("✅ 実行完了")
+    # DB保存
+    save_db(price_db)
+    print("✅ ノジマ4カテゴリ監視完了")
 
 if __name__ == "__main__":
     main()
